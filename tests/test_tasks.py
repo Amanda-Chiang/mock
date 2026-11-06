@@ -1,4 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
+import os
+from threading import Barrier, Lock
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -9,13 +11,28 @@ from app.database import Base, get_db
 from app.main import app
 
 
-test_engine = create_engine("sqlite:///./test_tasks.db", connect_args={"check_same_thread": False})
+TEST_DATABASE_URL = os.getenv(
+    "TEST_DATABASE_URL",
+    "postgresql+psycopg://postgres:postgres@localhost:5433/tasks_test",
+)
+test_engine = create_engine(TEST_DATABASE_URL, pool_size=5, max_overflow=0)
 TestingSessionLocal = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
+session_barrier = None
+session_pids = []
+session_lock = Lock()
+
+if test_engine.dialect.name != "postgresql":
+    raise RuntimeError("Tests require a PostgreSQL TEST_DATABASE_URL")
 
 
 def override_get_db():
     db = TestingSessionLocal()
     try:
+        backend_pid = db.connection().connection.driver_connection.info.backend_pid
+        with session_lock:
+            session_pids.append(backend_pid)
+        if session_barrier is not None:
+            session_barrier.wait(timeout=5)
         yield db
     finally:
         db.close()
@@ -120,14 +137,21 @@ def test_process_completed_task_returns_conflict():
 
 
 def test_concurrent_processing_allows_only_one_completion():
+    global session_barrier
     task_id = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
+    session_pids.clear()
+    session_barrier = Barrier(2)
 
     def process():
         concurrent_client = TestClient(app)
         return concurrent_client.post(f"/tasks/{task_id}/processes")
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        responses = list(executor.map(lambda _: process(), range(2)))
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(executor.map(lambda _: process(), range(2)))
+    finally:
+        session_barrier = None
 
     assert sorted(response.status_code for response in responses) == [200, 409]
+    assert len(set(session_pids)) == 2
     assert client.get(f"/tasks/{task_id}").json()["status"] == "completed"
