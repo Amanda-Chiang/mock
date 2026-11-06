@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, get_db
@@ -70,12 +70,18 @@ def list_tasks(status: Optional[str] = None, db: Session = Depends(get_db)) -> l
 
 @app.post("/tasks/{task_id}/processes", response_model=TaskResponse)
 def process_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
+    task = db.execute(
+        update(Task)
+        .where(Task.id == task_id, Task.status == "pending")
+        .values(status="completed")
+        .returning(Task)
+    ).scalar_one_or_none()
+    if task is not None:
+        db.commit()
+        db.refresh(task)
+        return task
+
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    if task.status == "completed":
-        raise HTTPException(status_code=409, detail="Task already completed")
-    task.status = "completed"
-    db.commit()
-    db.refresh(task)
-    return task
+    raise HTTPException(status_code=409, detail="Task already completed")

@@ -1,18 +1,15 @@
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 import pytest
 
 from app.database import Base, get_db
 from app.main import app
 
 
-test_engine = create_engine(
-    "sqlite://",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
-)
+test_engine = create_engine("sqlite:///./test_tasks.db", connect_args={"check_same_thread": False})
 TestingSessionLocal = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
 
 
@@ -120,3 +117,17 @@ def test_process_completed_task_returns_conflict():
 
     assert response.status_code == 409
     assert response.json() == {"detail": "Task already completed"}
+
+
+def test_concurrent_processing_allows_only_one_completion():
+    task_id = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
+
+    def process():
+        concurrent_client = TestClient(app)
+        return concurrent_client.post(f"/tasks/{task_id}/processes")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(lambda _: process(), range(2)))
+
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    assert client.get(f"/tasks/{task_id}").json()["status"] == "completed"
