@@ -165,11 +165,11 @@ def test_process_next_breaks_equal_priority_by_submission_time():
     assert response.json()["id"] == expected
 
 
-def test_process_next_returns_not_found_when_no_tasks_are_pending():
+def test_process_next_returns_no_content_when_no_tasks_are_pending():
     response = client.post("/tasks/process-next")
 
-    assert response.status_code == 404
-    assert response.json() == {"detail": "No pending tasks"}
+    assert response.status_code == 204
+    assert response.content == b""
 
 
 def test_process_completed_task_returns_conflict():

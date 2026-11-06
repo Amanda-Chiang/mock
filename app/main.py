@@ -1,8 +1,8 @@
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StrictInt
@@ -53,7 +53,7 @@ def submit_task(task: TaskCreate, db: Session = Depends(get_db)) -> dict[str, uu
 
 
 @app.post("/tasks/process-next", response_model=TaskResponse)
-def process_next_task(db: Session = Depends(get_db)) -> Task:
+def process_next_task(db: Session = Depends(get_db)) -> Union[Task, Response]:
     task = db.scalars(
         select(Task)
         .where(Task.status == "pending")
@@ -62,7 +62,7 @@ def process_next_task(db: Session = Depends(get_db)) -> Task:
         .limit(1)
     ).first()
     if task is None:
-        raise HTTPException(status_code=404, detail="No pending tasks")
+        return Response(status_code=204)
 
     task.status = "completed"
     db.commit()
