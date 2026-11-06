@@ -65,6 +65,7 @@ def test_retrieve_task_returns_task():
         "type": "report",
         "payload": {"period": "weekly"},
         "status": "pending",
+        "priority": 3,
     }
 
 
@@ -99,6 +100,22 @@ def test_submit_rejects_wrong_field_types(body):
     assert response.json() == {"detail": "Invalid request"}
 
 
+@pytest.mark.parametrize("priority", [0, 6, "3", 2.5, True])
+def test_submit_rejects_invalid_priority(priority):
+    response = client.post("/tasks", json={"type": "email", "payload": {}, "priority": priority})
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid request"}
+
+
+def test_submit_uses_default_and_requested_priority():
+    default_task = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
+    highest_task = client.post("/tasks", json={"type": "report", "payload": {}, "priority": 5}).json()["id"]
+
+    assert client.get(f"/tasks/{default_task}").json()["priority"] == 3
+    assert client.get(f"/tasks/{highest_task}").json()["priority"] == 5
+
+
 def test_list_tasks_can_filter_by_status():
     pending = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
     completed = client.post("/tasks", json={"type": "report", "payload": {}}).json()["id"]
@@ -124,6 +141,35 @@ def test_process_task_marks_pending_task_completed():
 
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
+
+
+def test_process_next_selects_highest_priority_task():
+    client.post("/tasks", json={"type": "low", "payload": {}, "priority": 1})
+    expected = client.post("/tasks", json={"type": "high", "payload": {}, "priority": 5}).json()["id"]
+    client.post("/tasks", json={"type": "middle", "payload": {}, "priority": 3})
+
+    response = client.post("/tasks/process-next")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == expected
+    assert response.json()["status"] == "completed"
+
+
+def test_process_next_breaks_equal_priority_by_submission_time():
+    expected = client.post("/tasks", json={"type": "first", "payload": {}, "priority": 4}).json()["id"]
+    client.post("/tasks", json={"type": "second", "payload": {}, "priority": 4})
+
+    response = client.post("/tasks/process-next")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == expected
+
+
+def test_process_next_returns_not_found_when_no_tasks_are_pending():
+    response = client.post("/tasks/process-next")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "No pending tasks"}
 
 
 def test_process_completed_task_returns_conflict():
@@ -155,3 +201,27 @@ def test_concurrent_processing_allows_only_one_completion():
     assert sorted(response.status_code for response in responses) == [200, 409]
     assert len(set(session_pids)) == 2
     assert client.get(f"/tasks/{task_id}").json()["status"] == "completed"
+
+
+def test_concurrent_process_next_claims_distinct_tasks():
+    global session_barrier
+    task_ids = [
+        client.post("/tasks", json={"type": "email", "payload": {}, "priority": 5}).json()["id"]
+        for _ in range(2)
+    ]
+    session_pids.clear()
+    session_barrier = Barrier(2)
+
+    def process_next():
+        concurrent_client = TestClient(app)
+        return concurrent_client.post("/tasks/process-next")
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(executor.map(lambda _: process_next(), range(2)))
+    finally:
+        session_barrier = None
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert {response.json()["id"] for response in responses} == set(task_ids)
+    assert len(set(session_pids)) == 2

@@ -5,7 +5,7 @@ from typing import Any, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
@@ -30,6 +30,7 @@ async def invalid_request(_: Request, __: RequestValidationError) -> JSONRespons
 class TaskCreate(BaseModel):
     type: str
     payload: dict[str, Any]
+    priority: StrictInt = Field(default=3, ge=1, le=5)
 
 
 class TaskResponse(BaseModel):
@@ -37,17 +38,36 @@ class TaskResponse(BaseModel):
     type: str
     payload: dict[str, Any]
     status: str
+    priority: int
 
     model_config = {"from_attributes": True}
 
 
 @app.post("/tasks", status_code=201)
 def submit_task(task: TaskCreate, db: Session = Depends(get_db)) -> dict[str, uuid.UUID]:
-    new_task = Task(type=task.type, payload=task.payload)
+    new_task = Task(type=task.type, payload=task.payload, priority=task.priority)
     db.add(new_task)
     db.commit()
     db.refresh(new_task)
     return {"id": new_task.id}
+
+
+@app.post("/tasks/process-next", response_model=TaskResponse)
+def process_next_task(db: Session = Depends(get_db)) -> Task:
+    task = db.scalars(
+        select(Task)
+        .where(Task.status == "pending")
+        .order_by(Task.priority.desc(), Task.created_at.asc(), Task.id.asc())
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    ).first()
+    if task is None:
+        raise HTTPException(status_code=404, detail="No pending tasks")
+
+    task.status = "completed"
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 @app.get("/tasks/{task_id}", response_model=TaskResponse)
