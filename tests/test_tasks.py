@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+import pytest
 
 from app.database import Base, get_db
 from app.main import app
@@ -53,6 +54,37 @@ def test_retrieve_task_returns_task():
     }
 
 
+@pytest.mark.parametrize("path", ["/tasks/00000000-0000-0000-0000-000000000000", "/tasks/00000000-0000-0000-0000-000000000000/processes"])
+def test_unknown_task_returns_not_found(path):
+    response = client.get(path) if path.endswith("000000") else client.post(path)
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Task not found"}
+
+
+@pytest.mark.parametrize("body", [{"payload": {}}, {"type": "email"}])
+def test_submit_requires_type_and_payload(body):
+    response = client.post("/tasks", json=body)
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid request"}
+
+
+def test_submit_rejects_invalid_json():
+    response = client.post("/tasks", content='{', headers={"content-type": "application/json"})
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid request"}
+
+
+@pytest.mark.parametrize("body", [{"type": 1, "payload": {}}, {"type": "email", "payload": "not-an-object"}])
+def test_submit_rejects_wrong_field_types(body):
+    response = client.post("/tasks", json=body)
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid request"}
+
+
 def test_list_tasks_can_filter_by_status():
     pending = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
     completed = client.post("/tasks", json={"type": "report", "payload": {}}).json()["id"]
@@ -64,6 +96,13 @@ def test_list_tasks_can_filter_by_status():
     assert [task["id"] for task in response.json()] == [pending]
 
 
+def test_list_tasks_rejects_invalid_status_filter():
+    response = client.get("/tasks", params={"status": "unknown"})
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid status"}
+
+
 def test_process_task_marks_pending_task_completed():
     task_id = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
 
@@ -71,3 +110,13 @@ def test_process_task_marks_pending_task_completed():
 
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
+
+
+def test_process_completed_task_returns_conflict():
+    task_id = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
+    client.post(f"/tasks/{task_id}/processes")
+
+    response = client.post(f"/tasks/{task_id}/processes")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Task already completed"}

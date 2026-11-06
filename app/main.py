@@ -2,7 +2,9 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -18,6 +20,11 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(_: Request, __: RequestValidationError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": "Invalid request"})
 
 
 class TaskCreate(BaseModel):
@@ -53,6 +60,8 @@ def retrieve_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
 
 @app.get("/tasks", response_model=list[TaskResponse])
 def list_tasks(status: Optional[str] = None, db: Session = Depends(get_db)) -> list[Task]:
+    if status is not None and status not in {"pending", "completed"}:
+        raise HTTPException(status_code=400, detail="Invalid status")
     query = select(Task)
     if status is not None:
         query = query.where(Task.status == status)
@@ -64,8 +73,9 @@ def process_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    if task.status == "pending":
-        task.status = "completed"
-        db.commit()
-        db.refresh(task)
+    if task.status == "completed":
+        raise HTTPException(status_code=409, detail="Task already completed")
+    task.status = "completed"
+    db.commit()
+    db.refresh(task)
     return task
