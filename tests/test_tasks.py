@@ -134,6 +134,16 @@ def test_list_tasks_rejects_invalid_status_filter():
     assert response.json() == {"detail": "Invalid status"}
 
 
+def test_list_tasks_can_filter_cancelled_tasks():
+    task_id = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
+    client.post(f"/tasks/{task_id}/cancel")
+
+    response = client.get("/tasks", params={"status": "cancelled"})
+
+    assert response.status_code == 200
+    assert [task["id"] for task in response.json()] == [task_id]
+
+
 def test_process_task_marks_pending_task_completed():
     task_id = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
 
@@ -172,6 +182,17 @@ def test_process_next_returns_no_content_when_no_tasks_are_pending():
     assert response.content == b""
 
 
+def test_process_next_skips_cancelled_tasks():
+    cancelled = client.post("/tasks", json={"type": "email", "payload": {}, "priority": 5}).json()["id"]
+    expected = client.post("/tasks", json={"type": "report", "payload": {}, "priority": 1}).json()["id"]
+    client.post(f"/tasks/{cancelled}/cancel")
+
+    response = client.post("/tasks/process-next")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == expected
+
+
 def test_process_completed_task_returns_conflict():
     task_id = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
     client.post(f"/tasks/{task_id}/processes")
@@ -179,7 +200,34 @@ def test_process_completed_task_returns_conflict():
     response = client.post(f"/tasks/{task_id}/processes")
 
     assert response.status_code == 409
-    assert response.json() == {"detail": "Task already completed"}
+    assert response.json() == {"detail": "Task cannot be processed"}
+
+
+def test_cancel_pending_task():
+    task_id = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
+
+    response = client.post(f"/tasks/{task_id}/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+
+def test_cancel_missing_task_returns_not_found():
+    response = client.post("/tasks/00000000-0000-0000-0000-000000000000/cancel")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Task not found"}
+
+
+@pytest.mark.parametrize("terminal_action", ["processes", "cancel"])
+def test_cancel_terminal_task_returns_conflict(terminal_action):
+    task_id = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
+    client.post(f"/tasks/{task_id}/{terminal_action}")
+
+    response = client.post(f"/tasks/{task_id}/cancel")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Task cannot be cancelled"}
 
 
 def test_concurrent_processing_allows_only_one_completion():
@@ -225,3 +273,24 @@ def test_concurrent_process_next_claims_distinct_tasks():
     assert [response.status_code for response in responses] == [200, 200]
     assert {response.json()["id"] for response in responses} == set(task_ids)
     assert len(set(session_pids)) == 2
+
+
+def test_concurrent_cancellation_and_processing_allow_one_transition():
+    global session_barrier
+    task_id = client.post("/tasks", json={"type": "email", "payload": {}}).json()["id"]
+    session_pids.clear()
+    session_barrier = Barrier(2)
+
+    def cancel_or_process(path):
+        concurrent_client = TestClient(app)
+        return concurrent_client.post(f"/tasks/{task_id}/{path}")
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(executor.map(cancel_or_process, ["cancel", "processes"]))
+    finally:
+        session_barrier = None
+
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    assert len(set(session_pids)) == 2
+    assert client.get(f"/tasks/{task_id}").json()["status"] in {"completed", "cancelled"}

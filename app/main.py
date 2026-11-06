@@ -80,7 +80,7 @@ def retrieve_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
 
 @app.get("/tasks", response_model=list[TaskResponse])
 def list_tasks(status: Optional[str] = None, db: Session = Depends(get_db)) -> list[Task]:
-    if status is not None and status not in {"pending", "completed"}:
+    if status is not None and status not in {"pending", "completed", "cancelled"}:
         raise HTTPException(status_code=400, detail="Invalid status")
     query = select(Task)
     if status is not None:
@@ -104,4 +104,23 @@ def process_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    raise HTTPException(status_code=409, detail="Task already completed")
+    raise HTTPException(status_code=409, detail="Task cannot be processed")
+
+
+@app.post("/tasks/{task_id}/cancel", response_model=TaskResponse)
+def cancel_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
+    task = db.execute(
+        update(Task)
+        .where(Task.id == task_id, Task.status == "pending")
+        .values(status="cancelled")
+        .returning(Task)
+    ).scalar_one_or_none()
+    if task is not None:
+        db.commit()
+        db.refresh(task)
+        return task
+
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    raise HTTPException(status_code=409, detail="Task cannot be cancelled")
